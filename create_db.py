@@ -1,50 +1,59 @@
 import sqlite3
+import os
 
-conn = sqlite3.connect("seatg33k.db")
-cursor = conn.cursor()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH     = os.path.join(BASE_DIR, "Database", "seatg33k.db")
+SCHEMA_PATH = os.path.join(BASE_DIR, "Database", "schema.sql")
+SEED_PATH   = os.path.join(BASE_DIR, "Database", "seed.sql")
 
-cursor.executescript("""
-PRAGMA foreign_keys = ON;
+# Remove existing database so we start clean
+if os.path.exists(DB_PATH):
+    os.remove(DB_PATH)
+    print(f"Removed existing database at {DB_PATH}")
 
-CREATE TABLE IF NOT EXISTS Participant (
-    ParticipantID INTEGER PRIMARY KEY AUTOINCREMENT,
-    FName         TEXT NOT NULL,
-    LName         TEXT NOT NULL,
-    ContactNo     TEXT,
-    EmailAd       TEXT NOT NULL UNIQUE,
-    Password      TEXT NOT NULL
-);
+conn = sqlite3.connect(DB_PATH)
+conn.execute("PRAGMA foreign_keys = ON;")
 
-CREATE TABLE IF NOT EXISTS Manager (
-    ManagerID  INTEGER PRIMARY KEY AUTOINCREMENT,
-    FName      TEXT NOT NULL,
-    LName      TEXT NOT NULL,
-    ContactNo  TEXT,
-    EmailAd    TEXT NOT NULL UNIQUE,
-    Password   TEXT NOT NULL
-);
+with open(SCHEMA_PATH, "r") as f:
+    conn.executescript(f.read())
+print("Schema applied.")
 
-CREATE TABLE IF NOT EXISTS Division (
-    DivID           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ParticipantID   INTEGER,
-    ManagerID       INTEGER,
-    Name            TEXT NOT NULL,
-    maxParticipants INTEGER NOT NULL,
-    FOREIGN KEY (ParticipantID) REFERENCES Participant(ParticipantID),
-    FOREIGN KEY (ManagerID)     REFERENCES Manager(ManagerID)
-);
+with open(SEED_PATH, "r") as f:
+    conn.executescript(f.read())
+print("Seed data applied.")
 
-CREATE TABLE IF NOT EXISTS Session (
-    SessID          INTEGER PRIMARY KEY AUTOINCREMENT,
-    DivID           INTEGER NOT NULL,
-    ParticipantID   INTEGER,
-    Name            TEXT NOT NULL,
-    avaliableSeats  INTEGER NOT NULL,
-    FOREIGN KEY (DivID)         REFERENCES Division(DivID),
-    FOREIGN KEY (ParticipantID) REFERENCES Participant(ParticipantID)
-);
+# ── Quick verification ──────────────────────────────────────────────────────
+cur = conn.cursor()
+cur.execute("SELECT COUNT(*) FROM participant")
+print(f"  Participants : {cur.fetchone()[0]}")
+cur.execute("SELECT COUNT(*) FROM manager")
+print(f"  Managers     : {cur.fetchone()[0]}")
+cur.execute("SELECT COUNT(*) FROM division")
+print(f"  Divisions    : {cur.fetchone()[0]}")
+cur.execute("SELECT COUNT(*) FROM session")
+print(f"  Sessions     : {cur.fetchone()[0]}")
+cur.execute("SELECT COUNT(*) FROM seat")
+print(f"  Seats        : {cur.fetchone()[0]}")
+cur.execute("SELECT COUNT(*) FROM session_enrollment")
+print(f"  Enrollments  : {cur.fetchone()[0]}")
+
+print("\nCapacity overview (per session):")
+cur.execute("""
+    SELECT session_name, max_participants, enrolled_count, available_by_capacity
+    FROM v_session_capacity
+    ORDER BY sess_id
 """)
+for row in cur.fetchall():
+    print(f"  {row[0]:<20} cap={row[1]}  enrolled={row[2]}  avail={row[3]}")
 
-conn.commit()
+print("\nDivision quotas per session:")
+cur.execute("""
+    SELECT session_name, division_name, max_seats, enrolled_count, available_seats
+    FROM v_division_session_capacity
+    ORDER BY sess_id, div_id
+""")
+for row in cur.fetchall():
+    print(f"  {row[0]:<20} {row[1]:<12} max={row[2]}  enrolled={row[3]}  avail={row[4]}")
+
 conn.close()
-print("Database 'seatg33k.db' created successfully.")
+print(f"\nDatabase ready: {DB_PATH}")
