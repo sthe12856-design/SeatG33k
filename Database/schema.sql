@@ -44,18 +44,25 @@ CREATE TABLE IF NOT EXISTS division_participant (
     FOREIGN KEY (participant_id) REFERENCES participant(participant_id) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
--- Sessions belong to a division.
+-- Organisation-wide sessions (shared across all divisions).
 CREATE TABLE IF NOT EXISTS session (
     sess_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    div_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
     max_participants INTEGER NOT NULL CHECK (max_participants > 0),
     starts_at TEXT,
     ends_at TEXT,
     status TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'open', 'closed', 'cancelled')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (div_id) REFERENCES division(div_id) ON DELETE CASCADE ON UPDATE CASCADE,
-    UNIQUE (div_id, name)
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Per-division seat quota within each session.
+CREATE TABLE IF NOT EXISTS session_division_limit (
+    sess_id   INTEGER NOT NULL,
+    div_id    INTEGER NOT NULL,
+    max_seats INTEGER NOT NULL CHECK (max_seats > 0),
+    PRIMARY KEY (sess_id, div_id),
+    FOREIGN KEY (sess_id) REFERENCES session(sess_id)  ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (div_id)  REFERENCES division(div_id)  ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- Physical seats for each session.
@@ -84,12 +91,11 @@ CREATE TABLE IF NOT EXISTS session_enrollment (
 
 CREATE INDEX IF NOT EXISTS idx_division_manager ON division(manager_id);
 CREATE INDEX IF NOT EXISTS idx_division_participant_participant ON division_participant(participant_id);
-CREATE INDEX IF NOT EXISTS idx_session_division ON session(div_id);
 CREATE INDEX IF NOT EXISTS idx_seat_session ON seat(sess_id);
 CREATE INDEX IF NOT EXISTS idx_enrollment_session ON session_enrollment(sess_id);
 CREATE INDEX IF NOT EXISTS idx_enrollment_participant ON session_enrollment(participant_id);
 
--- Prevent enrolling more than max_participants.
+-- Hard limit: no more than max_participants total per session.
 CREATE TRIGGER IF NOT EXISTS trg_capacity_before_insert
 BEFORE INSERT ON session_enrollment
 FOR EACH ROW
@@ -104,6 +110,32 @@ WHEN (
 )
 BEGIN
     SELECT RAISE(ABORT, 'Session capacity reached.');
+END;
+
+-- Hard limit: division cannot exceed its per-session quota.
+CREATE TRIGGER IF NOT EXISTS trg_division_limit_before_insert
+BEFORE INSERT ON session_enrollment
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'Division seat limit reached for this session.')
+    WHERE (
+        SELECT COUNT(se.participant_id)
+        FROM session_enrollment se
+        INNER JOIN division_participant dp ON dp.participant_id = se.participant_id
+        WHERE se.sess_id = NEW.sess_id
+          AND dp.div_id = (
+              SELECT dp2.div_id FROM division_participant dp2
+              WHERE dp2.participant_id = NEW.participant_id LIMIT 1
+          )
+    ) >= (
+        SELECT sdl.max_seats
+        FROM session_division_limit sdl
+        WHERE sdl.sess_id = NEW.sess_id
+          AND sdl.div_id = (
+              SELECT dp3.div_id FROM division_participant dp3
+              WHERE dp3.participant_id = NEW.participant_id LIMIT 1
+          )
+    );
 END;
 
 -- Prevent assigning a seat that belongs to another session.
@@ -135,12 +167,11 @@ BEGIN
     SELECT RAISE(ABORT, 'Seat does not belong to this session or is inactive.');
 END;
 
--- Reporting view for available seats and occupancy.
+-- Overall session capacity view.
 CREATE VIEW IF NOT EXISTS v_session_capacity AS
 SELECT
     s.sess_id,
     s.name AS session_name,
-    s.div_id,
     s.max_participants,
     COALESCE((
         SELECT COUNT(*)
@@ -174,5 +205,29 @@ SELECT
         ), 0)
     ) AS available_physical_seats
 FROM session s;
+
+-- Per-division breakdown within each session.
+CREATE VIEW IF NOT EXISTS v_division_session_capacity AS
+SELECT
+    sdl.sess_id,
+    s.name    AS session_name,
+    sdl.div_id,
+    d.name    AS division_name,
+    sdl.max_seats,
+    COALESCE((
+        SELECT COUNT(se.participant_id)
+        FROM session_enrollment se
+        INNER JOIN division_participant dp ON dp.participant_id = se.participant_id
+        WHERE se.sess_id = sdl.sess_id AND dp.div_id = sdl.div_id
+    ), 0) AS enrolled_count,
+    sdl.max_seats - COALESCE((
+        SELECT COUNT(se.participant_id)
+        FROM session_enrollment se
+        INNER JOIN division_participant dp ON dp.participant_id = se.participant_id
+        WHERE se.sess_id = sdl.sess_id AND dp.div_id = sdl.div_id
+    ), 0) AS available_seats
+FROM session_division_limit sdl
+JOIN session  s ON s.sess_id = sdl.sess_id
+JOIN division d ON d.div_id  = sdl.div_id;
 
 COMMIT;
